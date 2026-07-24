@@ -1,4 +1,5 @@
 import random
+import re
 from aiogram import Router, types, F
 from aiogram.filters import Command
 from database import db
@@ -9,19 +10,34 @@ from config import settings
 router = Router()
 
 def parse_bet(message: types.Message, bet_str: str) -> int:
+    """Умный парсер ставки: поддерживает 'всё', '10к', '1.5кк', '2м'"""
     user_bal = db.get_balance(message.from_user.id)
-    bet_str_clean = bet_str.strip().lower()
+    s = bet_str.strip().lower().replace(",", ".")
 
-    # Поддержка ва-банка («всё», «все», «all»)
-    if bet_str_clean in ["всё", "все", "all"]:
+    # 1. Обработка Ва-банка
+    if s in ["всё", "все", "all", "вабанк"]:
         if user_bal <= 0:
-            raise ValueError("❌ У вас 0 коинов на балансе!")
+            raise ValueError("❌ Ваш баланс пуст!")
         return user_bal
 
-    if not bet_str_clean.isdigit():
-        raise ValueError("❌ Ставка должна быть числом или словом **всё** (например: `/tower всё`).")
-    
-    bet = int(bet_str_clean)
+    # 2. Обработка сокращений (к, кк, м)
+    multiplier = 1
+    # Миллионы (кк, kk, м, m)
+    if re.search(r'(кк|kk|м|m)$', s):
+        multiplier = 1_000_000
+        s = re.sub(r'(кк|kk|м|m)$', '', s)
+    # Тысячи (к, k)
+    elif re.search(r'(к|k)$', s):
+        multiplier = 1_000
+        s = re.sub(r'(к|k)$', '', s)
+
+    try:
+        # Превращаем в число (float, чтобы работало 1.5к)
+        val = float(s)
+        bet = int(val * multiplier)
+    except ValueError:
+        raise ValueError("❌ Неверный формат ставки! Используйте: `100`, `10к`, `1.5кк` или `всё`.")
+
     if bet <= 0:
         raise ValueError("❌ Ставка должна быть больше нуля.")
     
@@ -33,39 +49,29 @@ def parse_bet(message: types.Message, bet_str: str) -> int:
 # === ГЕНЕРАЦИЯ КРАША ===
 def generate_crash_multiplier() -> float:
     r = random.random()
-    if r < 0.07:  
-        return 1.00
-    elif r < 0.90:  
-        return round(1.01 + (random.random() ** 1.7) * 8.99, 2)
-    else:  
-        return round(10.01 + (random.random() ** 2.0) * 90.0, 2)
+    if r < 0.07: return 1.00
+    elif r < 0.90: return round(1.01 + (random.random() ** 1.7) * 8.99, 2)
+    else: return round(10.01 + (random.random() ** 2.0) * 90.0, 2)
 
 # === ИГРА КРАШ ===
 @router.message(Command("crash", "краш"))
 async def cmd_crash(message: types.Message):
     parts = message.text.split()
     if len(parts) < 3:
-        await message.reply("📝 Использование: `/crash [ставка/всё] [коэффициент]`\n_Примеры: /crash 100 2.5 или /crash всё 2.0_", parse_mode="Markdown")
+        await message.reply("📝 Использование: `/краш [ставка] [коэф]`\n_Примеры: /краш всё 2.5 или /краш 10к 1.5_", parse_mode="Markdown")
         return
 
-    active_game = db.get_active_game(message.from_user.id)
-    if active_game:
-        await message.reply("❌ Нельзя играть в Краш при активной игре на поле (Башня/Алмазы/Пирамида)!")
+    if db.get_active_game(message.from_user.id):
+        await message.reply("❌ Сначала завершите текущую игру на поле!")
         return
 
     try:
         bet = parse_bet(message, parts[1])
+        chosen_multiplier = float(parts[2].replace(",", "."))
+        if chosen_multiplier <= 1.0: raise ValueError()
     except ValueError as e:
-        await message.reply(str(e), parse_mode="Markdown")
-        return
-
-    coef_str = parts[2].replace(",", ".")
-    try:
-        chosen_multiplier = float(coef_str)
-        if chosen_multiplier <= 1.0:
-            raise ValueError()
-    except ValueError:
-        await message.reply("❌ Коэффициент автовывода должен быть числом больше 1.0.")
+        msg = str(e) if "❌" in str(e) else "❌ Ошибка в ставке или коэффициенте."
+        await message.reply(msg, parse_mode="Markdown")
         return
 
     crash_point = generate_crash_multiplier()
@@ -74,52 +80,39 @@ async def cmd_crash(message: types.Message):
     if crash_point >= chosen_multiplier:
         payout = int(bet * chosen_multiplier)
         new_bal = db.update_balance(message.from_user.id, payout)
-        
         await message.reply(
-            f"📈 **ИГРА КРАШ**\n\n"
-            f"🚀 Ракета успешно долетела до вашего автовывода и полетела дальше!\n"
-            f"💥 Ракета взорвалась на отметке: **{crash_point:.2f}x**\n\n"
-            f"🎉 **ВЫ ВЫИГРАЛИ!**\n"
-            f"🎯 Ваша цель: **{chosen_multiplier:.2f}x**\n"
-            f"💵 Начислено: **{payout:,}** коинов\n"
-            f"💰 Ваш баланс: **{new_bal:,}** коинов.",
+            f"📈 **КРАШ**\n🚀 Ракета долетела до: **{crash_point:.2f}x**\n"
+            f"🎉 Победитель: {message.from_user.mention_markdown()}\n"
+            f"🎯 Коэффициент: **{chosen_multiplier:.2f}x**\n"
+            f"💵 Выигрыш: **{payout:,}** коинов\n"
+            f"💰 Ваш баланс: **{new_bal:,}**", 
             parse_mode="Markdown"
         )
     else:
-        new_bal = db.get_balance(message.from_user.id)
-        
         await message.reply(
-            f"📈 **ИГРА КРАШ**\n\n"
-            f"💥 **РАКЕТА КРАШНУЛАСЬ!**\n"
-            f"💨 Взрыв произошел на отметке: **{crash_point:.2f}x**\n\n"
-            f"❌ **ВЫ ПРОИГРАЛИ!**\n"
-            f"🎯 Ваша цель была: **{chosen_multiplier:.2f}x**\n"
+            f"📈 **КРАШ**\n💥 Ракету разорвало на: **{crash_point:.2f}x**\n"
+            f"❌ Проигравший: {message.from_user.mention_markdown()}\n"
             f"💸 Потеряно: **{bet:,}** коинов\n"
-            f"💰 Ваш баланс: **{new_bal:,}** коинов.",
+            f"💰 Ваш баланс: **{db.get_balance(message.from_user.id):,}**", 
             parse_mode="Markdown"
         )
 
-# === ЗАПУСК ИГР НА ПОЛЕ ===
+# === ИГРЫ НА ПОЛЕ ===
 @router.message(Command("tower", "diamonds", "pyramid", "башня", "алмазы", "пирамида"))
 async def start_grid_game(message: types.Message):
+    # Определяем тип игры по команде
     cmd = message.text.split()[0].lower().replace("/", "")
-    if cmd in ["башня", "tower"]:
-        game_type = "tower"
-    elif cmd in ["алмазы", "diamonds"]:
-        game_type = "diamonds"
-    else:
-        game_type = "pyramid"
+    if cmd in ["башня", "tower"]: game_type = "tower"
+    elif cmd in ["алмазы", "diamonds"]: game_type = "diamonds"
+    else: game_type = "pyramid"
 
-    db.get_user(message.from_user.id, message.from_user.username)
-    
-    active = db.get_active_game(message.from_user.id)
-    if active:
-        await message.reply(f"❌ У вас уже запущена игра **{GAME_SPECS[active['type']]['name']}**! Закончите её.")
+    if db.get_active_game(message.from_user.id):
+        await message.reply("❌ У вас уже есть активная игра! Закончите её.")
         return
 
     parts = message.text.split()
     if len(parts) < 2:
-        await message.reply(f"📝 Использование: `/{cmd} [ставка/всё]`\n_Пример: /{cmd} всё_", parse_mode="Markdown")
+        await message.reply(f"📝 Использование: `/{cmd} [ставка]`\n_Примеры: /{cmd} 500, /{cmd} 10к, /{cmd} всё_", parse_mode="Markdown")
         return
 
     try:
@@ -129,155 +122,86 @@ async def start_grid_game(message: types.Message):
         return
 
     spec = GAME_SPECS[game_type]
-    mines = generate_mines(game_type)
+    db.start_game(message.from_user.id, game_type, bet, generate_mines(game_type))
     
-    db.start_game(message.from_user.id, game_type, bet, mines)
-    
-    kb = get_game_keyboard(
-        current_level=1,
-        history={},
-        max_levels=spec["levels"],
-        width=spec["width"]
-    )
-    
+    kb = get_game_keyboard(1, {}, spec["levels"], spec["width"], message.from_user.id)
     await message.reply(
-        f"🎮 Игра **{spec['name']}** началась!\n"
-        f"💰 Ставка: **{bet:,}** коинов.\n"
-        f"📈 Старт: **1.0x**\n\n"
-        f"👇 Сделайте выбор на Ряду 1 (самый нижний):",
-        reply_markup=kb,
-        parse_mode="Markdown"
+        f"🎮 **{spec['name']}**\n👤 Игрок: {message.from_user.mention_markdown()}\n"
+        f"💰 Ставка: **{bet:,}** коинов\n📈 Множитель: **1.0x**\n\n"
+        f"👇 Выберите ячейку в нижнем ряду:", 
+        reply_markup=kb, parse_mode="Markdown"
     )
 
-# === ИГРОВОЙ ИНТЕРФАКТОР (CALLBACKS) ===
+# === CALLBACK HANDLER (ХОДЫ И КНОПКИ) ===
 @router.callback_query(F.data.startswith("game_action:"))
 async def handle_game_callback(callback: types.CallbackQuery):
-    user_id = callback.from_user.id
     parts = callback.data.split(":")
     action = parts[1]
+    owner_id = int(parts[-1])
 
-    if action == "locked":
-        await callback.answer("🔒 Уровень заблокирован! Сначала пройдите нижний.", show_alert=True)
-        return
-    if action == "passed":
-        await callback.answer("💎 Этот уровень уже успешно пройден!", show_alert=True)
-        return
-    if action == "ended":
-        await callback.answer("🎮 Эта игра уже завершена.", show_alert=True)
+    # Защита от чужих нажатий
+    if owner_id != 0 and owner_id != callback.from_user.id:
+        await callback.answer("⚠️ Это не ваша игра! Начните свою.", show_alert=True)
         return
 
+    user_id = callback.from_user.id
     game = db.get_active_game(user_id)
     if not game:
-        await callback.answer("❌ Нет активной игры! Начните новую.", show_alert=True)
-        try:
-            await callback.message.edit_reply_markup(reply_markup=None)
-        except Exception:
-            pass
+        await callback.answer("❌ Игра не найдена.")
         return
 
-    game_type = game["type"]
-    spec = GAME_SPECS[game_type]
-    bet = game["bet"]
-    current_level = game["current_level"]
-    history = game.get("history", {})
-    mines = game["mines"]
+    spec = GAME_SPECS[game["type"]]
 
-    if action == "forfeit":
-        db.finish_game(user_id, won=False)
-        await callback.answer("💸 Вы сдались и потеряли ставку.", show_alert=True)
-        
-        revealed_kb = get_revealed_keyboard(spec["levels"], spec["width"], mines, history)
+    if action == "cashout":
+        payout = db.finish_game(user_id, won=True)
         await callback.message.edit_text(
-            f"❌ Вы сдались в игре **{spec['name']}**.\n"
-            f"💸 Ставка в размере **{bet:,}** коинов сгорела.\n"
-            f"💰 Баланс: **{db.get_balance(user_id):,}** коинов.",
-            reply_markup=revealed_kb,
+            f"🎉 **ВЫИГРЫШ ЗАБРАН!**\n👤 {callback.from_user.mention_markdown()}\n"
+            f"📈 Итоговый коэф: **{game['multiplier']}x**\n"
+            f"💵 Сумма: **{payout:,}** коинов\n💰 Баланс: **{db.get_balance(user_id):,}**",
+            reply_markup=get_revealed_keyboard(spec["levels"], spec["width"], game["mines"], game["history"]),
             parse_mode="Markdown"
         )
         return
 
-    if action == "cashout":
-        multiplier = game["multiplier"]
-        payout = db.finish_game(user_id, won=True)
-        await callback.answer(f"🎉 Вы успешно вывели {payout:,} коинов!", show_alert=True)
-        
-        revealed_kb = get_revealed_keyboard(spec["levels"], spec["width"], mines, history)
+    if action == "forfeit":
+        db.finish_game(user_id, won=False)
         await callback.message.edit_text(
-            f"🎉 **ПОБЕДА (ВЫВОД)!**\n"
-            f"🎮 Игра: **{spec['name']}**\n"
-            f"📈 Множитель: **{multiplier}x**\n"
-            f"💵 Вы выиграли: **{payout:,}** коинов\n"
-            f"💰 Ваш баланс: **{db.get_balance(user_id):,}** коинов.",
-            reply_markup=revealed_kb,
+            f"❌ **ИГРА ОКОНЧЕНА (СДАЧА)**\n👤 {callback.from_user.mention_markdown()}\n"
+            f"💸 Потеряно: **{game['bet']:,}** коинов.",
+            reply_markup=get_revealed_keyboard(spec["levels"], spec["width"], game["mines"], game["history"]),
             parse_mode="Markdown"
         )
         return
 
     if action == "click":
-        click_level = int(parts[2])
-        click_col = int(parts[3])
+        lvl, col = int(parts[2]), int(parts[3])
+        if lvl != game["current_level"]: return
 
-        if click_level != current_level:
-            await callback.answer("⚠️ Делайте ход на активном ряду!", show_alert=True)
-            return
-
-        level_mines = mines[current_level - 1]
-        if click_col in level_mines:
+        if col in game["mines"][lvl-1]:
             db.finish_game(user_id, won=False)
-            await callback.answer("💥 БУМ! Мина!", show_alert=True)
-            
-            revealed_kb = get_revealed_keyboard(
-                spec["levels"], spec["width"], mines, history,
-                exploded_lvl=current_level, exploded_col=click_col
-            )
             await callback.message.edit_text(
-                f"💥 **ВЫ ВЗОРВАЛИСЬ!**\n"
-                f"🎮 Игра: **{spec['name']}**\n"
-                f"💀 Ошибка на уровне **{current_level}**\n"
-                f"💸 Потеряно: **{bet:,}** коинов.\n"
-                f"💰 Баланс: **{db.get_balance(user_id):,}** коинов.",
-                reply_markup=revealed_kb,
+                f"💥 **БУМ! МИНА!**\n👤 {callback.from_user.mention_markdown()}\n"
+                f"💀 Вы взорвались на {lvl} ряду.\n💸 Потеряно: **{game['bet']:,}** коинов.",
+                reply_markup=get_revealed_keyboard(spec["levels"], spec["width"], game["mines"], game["history"], lvl, col),
                 parse_mode="Markdown"
             )
-            return
         else:
-            history[str(current_level)] = click_col
-            next_level = current_level + 1
-            completed_mult = spec["multipliers"][current_level]
-
-            if current_level == spec["levels"]:
-                db.update_game_level(user_id, next_level, completed_mult, history)
+            history = game["history"]
+            history[str(lvl)] = col
+            new_mult = spec["multipliers"][lvl]
+            if lvl == spec["levels"]:
+                db.update_game_level(user_id, lvl+1, new_mult, history)
                 payout = db.finish_game(user_id, won=True)
-                await callback.answer("🏆 НЕВЕРОЯТНО! ВСЯ СЕТКА ПРОЙДЕНА!", show_alert=True)
-                
-                revealed_kb = get_revealed_keyboard(spec["levels"], spec["width"], mines, history)
                 await callback.message.edit_text(
-                    f"🏆 **ГРАНДИОЗНАЯ ПОБЕДА!**\n"
-                    f"🎮 Игра: **{spec['name']}**\n"
-                    f"📈 Итоговый множитель: **{completed_mult}x**\n"
-                    f"💵 Выигрыш: **{payout:,}** коинов!\n"
-                    f"💰 Баланс: **{db.get_balance(user_id):,}** коинов.",
-                    reply_markup=revealed_kb,
+                    f"🏆 **ПОЛНАЯ ПОБЕДА!**\n👤 {callback.from_user.mention_markdown()}\n"
+                    f"📈 Множитель: **{new_mult}x**\n"
+                    f"💵 Выигрыш: **{payout:,}** коинов!",
+                    reply_markup=get_revealed_keyboard(spec["levels"], spec["width"], game["mines"], history),
                     parse_mode="Markdown"
                 )
             else:
-                db.update_game_level(user_id, next_level, completed_mult, history)
-                next_mult = spec["multipliers"][next_level]
-                
-                kb = get_game_keyboard(
-                    current_level=next_level,
-                    history=history,
-                    max_levels=spec["levels"],
-                    width=spec["width"]
+                db.update_game_level(user_id, lvl+1, new_mult, history)
+                await callback.message.edit_reply_markup(
+                    reply_markup=get_game_keyboard(lvl+1, history, spec["levels"], spec["width"], user_id)
                 )
-                
-                await callback.message.edit_text(
-                    f"🎮 Игра: **{spec['name']}**\n"
-                    f"💰 Ставка: **{bet:,}** коинов.\n"
-                    f"📈 Фиксированный коэф: **{completed_mult}x** (выигрыш: {int(bet*completed_mult):,})\n"
-                    f"🎯 Следующий ряд: **{next_level}** (коэф: **{next_mult}x**)\n\n"
-                    f"👇 Выберите ячейку на ряду {next_level}:",
-                    reply_markup=kb,
-                    parse_mode="Markdown"
-                )
-                await callback.answer("💎 Чисто! Вы поднимаетесь выше.")
+        await callback.answer()
