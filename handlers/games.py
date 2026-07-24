@@ -9,30 +9,35 @@ from config import settings
 router = Router()
 
 def parse_bet(message: types.Message, bet_str: str) -> int:
-    if not bet_str.isdigit():
-        raise ValueError("❌ Ставка должна быть целым положительным числом.")
-    bet = int(bet_str)
+    user_bal = db.get_balance(message.from_user.id)
+    bet_str_clean = bet_str.strip().lower()
+
+    # Поддержка ва-банка («всё», «все», «all»)
+    if bet_str_clean in ["всё", "все", "all"]:
+        if user_bal <= 0:
+            raise ValueError("❌ У вас 0 коинов на балансе!")
+        return user_bal
+
+    if not bet_str_clean.isdigit():
+        raise ValueError("❌ Ставка должна быть числом или словом **всё** (например: `/tower всё`).")
+    
+    bet = int(bet_str_clean)
     if bet <= 0:
         raise ValueError("❌ Ставка должна быть больше нуля.")
     
-    user_bal = db.get_balance(message.from_user.id)
     if bet > user_bal:
         raise ValueError(f"❌ Недостаточно средств! Ваш баланс: **{user_bal:,}** коинов.")
     
     return bet
 
-# === ГЕНЕРАЦИЯ КРАША (НОВАЯ МАТЕМАТИКА) ===
+# === ГЕНЕРАЦИЯ КРАША ===
 def generate_crash_multiplier() -> float:
     r = random.random()
     if r < 0.07:  
-        # 7% шанс моментального взрыва на взлете
         return 1.00
     elif r < 0.90:  
-        # 83% шанс взрыва в диапазоне 1.01x - 10.0x
-        # Возведение в степень 1.7 сдвигает вероятность к началу (низкие иксы выпадают чаще)
         return round(1.01 + (random.random() ** 1.7) * 8.99, 2)
     else:  
-        # 10% шанс улететь выше 10.0x (редкие крупные множители)
         return round(10.01 + (random.random() ** 2.0) * 90.0, 2)
 
 # === ИГРА КРАШ ===
@@ -40,7 +45,7 @@ def generate_crash_multiplier() -> float:
 async def cmd_crash(message: types.Message):
     parts = message.text.split()
     if len(parts) < 3:
-        await message.reply("📝 Использование: `/crash [ставка] [коэффициент]`\n_Пример: /crash 100 2.5_", parse_mode="Markdown")
+        await message.reply("📝 Использование: `/crash [ставка/всё] [коэффициент]`\n_Примеры: /crash 100 2.5 или /crash всё 2.0_", parse_mode="Markdown")
         return
 
     active_game = db.get_active_game(message.from_user.id)
@@ -63,15 +68,10 @@ async def cmd_crash(message: types.Message):
         await message.reply("❌ Коэффициент автовывода должен быть числом больше 1.0.")
         return
 
-    # Генерируем точку краша ракеты
     crash_point = generate_crash_multiplier()
-
-    # Списываем ставку перед началом полета
     db.update_balance(message.from_user.id, -bet)
 
-    # Логика исхода игры
     if crash_point >= chosen_multiplier:
-        # Ракета долетела до коэффициента игрока -> Победа!
         payout = int(bet * chosen_multiplier)
         new_bal = db.update_balance(message.from_user.id, payout)
         
@@ -86,7 +86,6 @@ async def cmd_crash(message: types.Message):
             parse_mode="Markdown"
         )
     else:
-        # Ракета взорвалась раньше -> Проигрыш
         new_bal = db.get_balance(message.from_user.id)
         
         await message.reply(
@@ -120,7 +119,7 @@ async def start_grid_game(message: types.Message):
 
     parts = message.text.split()
     if len(parts) < 2:
-        await message.reply(f"📝 Использование: `/{cmd} [ставка]`\n_Пример: /{cmd} 100_", parse_mode="Markdown")
+        await message.reply(f"📝 Использование: `/{cmd} [ставка/всё]`\n_Пример: /{cmd} всё_", parse_mode="Markdown")
         return
 
     try:
