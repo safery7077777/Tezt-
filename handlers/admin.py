@@ -2,6 +2,7 @@ from aiogram import Router, types
 from aiogram.filters import Command
 from config import ADMIN_ID_LIST, ADMIN_USERNAME_LIST
 from database import db
+from game_config import GAME_SPECS
 
 router = Router()
 
@@ -12,6 +13,7 @@ def is_admin(user: types.User) -> bool:
         return True
     return False
 
+# === ВЫДАЧА КОИНОВ ===
 @router.message(Command("выдать", "give"))
 async def admin_give_coins(message: types.Message):
     if not is_admin(message.from_user):
@@ -49,3 +51,92 @@ async def admin_give_coins(message: types.Message):
         f"💰 Новый баланс пользователя: **{new_bal:,}** коинов.",
         parse_mode="Markdown"
     )
+
+# === РЕЖИМ БОГА: ПРОСМОТР АКТИВНОЙ ИГРЫ (СВОЕЙ ИЛИ ЧУЖОЙ) ===
+@router.message(Command("просмотр", "view"))
+async def admin_view_game(message: types.Message):
+    if not is_admin(message.from_user):
+        await message.reply("❌ У вас нет прав для выполнения этой команды.")
+        return
+
+    parts = message.text.split()
+    
+    # Если админ не ввел юзернейм, смотрим ЕГО СОБСТВЕННУЮ игру
+    if len(parts) < 2:
+        target_uid = str(message.from_user.id)
+        target_input = "Ваша собственная игра"
+    else:
+        # Если ввел юзернейм/ID, ищем этого игрока
+        target_input = parts[1].strip()
+        found_uid, user_data = db.get_user_by_username(target_input)
+        if not found_uid:
+            await message.reply(
+                f"❌ Пользователь `{target_input}` не найден в базе данных.",
+                parse_mode="Markdown"
+            )
+            return
+        target_uid = found_uid
+
+    # Получаем активную игру по ID
+    game = db.get_active_game(int(target_uid))
+    if not game:
+        if len(parts) < 2:
+            await message.reply(
+                "👀 У вас сейчас **нет активных игр**.\nЗапустите сначала игру, например: `/tower 100`, а затем введите `/просмотр`."
+            )
+        else:
+            await message.reply(
+                f"👀 У пользователя `{target_input}` сейчас **нет активных игр** на игровом поле.",
+                parse_mode="Markdown"
+            )
+        return
+
+    game_type = game["type"]
+    spec = GAME_SPECS[game_type]
+    bet = game["bet"]
+    current_level = game["current_level"]
+    history = game.get("history", {})
+    mines_layout = game["mines"]
+
+    # Генерируем карту мин
+    grid_lines = []
+    
+    # Итерируемся по уровням сверху вниз
+    for lvl in range(spec["levels"], 0, -1):
+        row_mines = mines_layout[lvl - 1]
+        player_pick = history.get(str(lvl))
+        
+        row_emojis = []
+        for col in range(spec["width"]):
+            is_mine = col in row_mines
+            is_picked = player_pick is not None and int(player_pick) == col
+            
+            if is_mine:
+                row_emojis.append("💣")  # Мина (красный флаг)
+            elif is_picked:
+                row_emojis.append("🟢")  # Выбранное безопасное поле
+            else:
+                row_emojis.append("⚪")  # Скрытое безопасное поле
+
+        row_str = " ".join(row_emojis)
+        mult = spec["multipliers"][lvl]
+        
+        # Пометка текущего активного уровня
+        marker = " 👈 (сейчас выбирать тут)" if lvl == current_level else ""
+        
+        grid_lines.append(f"**Ряд {lvl:02d}** ({mult}x):  {row_str}{marker}")
+
+    # Собираем красивый ответ
+    response = [
+        f"🕵️‍♂️ **РЕЖИМ НАБЛЮДАТЕЛЯ**",
+        f"👤 Цель: **{target_input}**",
+        f"🎮 Игра: **{spec['name']}**",
+        f"💵 Ставка: **{bet:,}** коинов",
+        f"📈 Текущий уровень: **{current_level}** из **{spec['levels']}**",
+        f"📊 Накопленный множитель: **{game['multiplier']}x**\n",
+        "🗺 **КАРТА ИГРОВОГО ПОЛЯ (Сверху вниз):**",
+        "ℹ️ _💣 — Мина | 🟢 — Выбрано вами | ⚪ — Безопасно_\n",
+        "\n".join(grid_lines)
+    ]
+
+    await message.reply("\n".join(response), parse_mode="Markdown")
