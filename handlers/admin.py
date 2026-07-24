@@ -29,7 +29,7 @@ async def admin_give_coins(message: types.Message):
     amount_str = parts[2].strip()
 
     if not amount_str.isdigit():
-        await message.reply("❌ Количество коинов должно быть целым числом.")
+        await message.reply("❌ Количество коинов должно быть целым положительным числом.")
         return
 
     amount = int(amount_str)
@@ -52,7 +52,47 @@ async def admin_give_coins(message: types.Message):
         parse_mode="Markdown"
     )
 
-# === РЕЖИМ БОГА: ПРОСМОТР АКТИВНОЙ ИГРЫ (СВОЕЙ ИЛИ ЧУЖОЙ) ===
+# === СПИСАНИЕ (ЗАБРАТЬ) КОИНОВ ===
+@router.message(Command("забрать", "take"))
+async def admin_take_coins(message: types.Message):
+    if not is_admin(message.from_user):
+        await message.reply("❌ У вас нет прав для выполнения этой команды.")
+        return
+
+    parts = message.text.split()
+    if len(parts) < 3:
+        await message.reply("📝 Использование: `/забрать [юзернейм_или_ID] [количество]`", parse_mode="Markdown")
+        return
+
+    target_input = parts[1].strip()
+    amount_str = parts[2].strip()
+
+    if not amount_str.isdigit():
+        await message.reply("❌ Количество коинов должно быть целым положительным числом.")
+        return
+
+    amount = int(amount_str)
+    if amount <= 0:
+        await message.reply("❌ Количество коинов должно быть больше нуля.")
+        return
+
+    target_uid, user_data = db.get_user_by_username(target_input)
+    if not target_uid:
+        await message.reply(
+            f"❌ Игрок `{target_input}` не найден в базе данных.\nОн должен написать боту хотя бы один раз.",
+            parse_mode="Markdown"
+        )
+        return
+
+    # Передаем отрицательное значение для уменьшения баланса
+    new_bal = db.update_balance(int(target_uid), -amount)
+    await message.reply(
+        f"🔻 Списано **{amount:,}** коинов у пользователя `{target_input}`.\n"
+        f"💰 Новый баланс пользователя: **{new_bal:,}** коинов.",
+        parse_mode="Markdown"
+    )
+
+# === РЕЖИМ БОГА: ПРОСМОТР АКТИВНОЙ ИГРЫ ===
 @router.message(Command("просмотр", "view"))
 async def admin_view_game(message: types.Message):
     if not is_admin(message.from_user):
@@ -61,12 +101,10 @@ async def admin_view_game(message: types.Message):
 
     parts = message.text.split()
     
-    # Если админ не ввел юзернейм, смотрим ЕГО СОБСТВЕННУЮ игру
     if len(parts) < 2:
         target_uid = str(message.from_user.id)
         target_input = "Ваша собственная игра"
     else:
-        # Если ввел юзернейм/ID, ищем этого игрока
         target_input = parts[1].strip()
         found_uid, user_data = db.get_user_by_username(target_input)
         if not found_uid:
@@ -77,7 +115,6 @@ async def admin_view_game(message: types.Message):
             return
         target_uid = found_uid
 
-    # Получаем активную игру по ID
     game = db.get_active_game(int(target_uid))
     if not game:
         if len(parts) < 2:
@@ -98,10 +135,7 @@ async def admin_view_game(message: types.Message):
     history = game.get("history", {})
     mines_layout = game["mines"]
 
-    # Генерируем карту мин
     grid_lines = []
-    
-    # Итерируемся по уровням сверху вниз
     for lvl in range(spec["levels"], 0, -1):
         row_mines = mines_layout[lvl - 1]
         player_pick = history.get(str(lvl))
@@ -112,21 +146,18 @@ async def admin_view_game(message: types.Message):
             is_picked = player_pick is not None and int(player_pick) == col
             
             if is_mine:
-                row_emojis.append("💣")  # Мина (красный флаг)
+                row_emojis.append("💣")
             elif is_picked:
-                row_emojis.append("🟢")  # Выбранное безопасное поле
+                row_emojis.append("🟢")
             else:
-                row_emojis.append("⚪")  # Скрытое безопасное поле
+                row_emojis.append("⚪")
 
         row_str = " ".join(row_emojis)
         mult = spec["multipliers"][lvl]
-        
-        # Пометка текущего активного уровня
         marker = " 👈 (сейчас выбирать тут)" if lvl == current_level else ""
         
         grid_lines.append(f"**Ряд {lvl:02d}** ({mult}x):  {row_str}{marker}")
 
-    # Собираем красивый ответ
     response = [
         f"🕵️‍♂️ **РЕЖИМ НАБЛЮДАТЕЛЯ**",
         f"👤 Цель: **{target_input}**",
