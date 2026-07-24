@@ -72,7 +72,7 @@ class Database:
 
     def update_balance(self, user_id: int, amount: int) -> int:
         uid = str(user_id)
-        self.get_user(user_id)  # гарантируем, что пользователь создан
+        self.get_user(user_id)
         with self.lock:
             current_bal = self.data["users"][uid]["balance"]
             new_bal = current_bal + amount
