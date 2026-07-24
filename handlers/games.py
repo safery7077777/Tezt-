@@ -19,9 +19,21 @@ def parse_bet(message: types.Message, bet_str: str) -> int:
     if bet > user_bal:
         raise ValueError(f"❌ Недостаточно средств! Ваш баланс: **{user_bal:,}** коинов.")
     
-    if bet > settings.MAX_BALANCE:
-        raise ValueError(f"❌ Лимит максимальной ставки: **{settings.MAX_BALANCE:,}** коинов.")
     return bet
+
+# === ГЕНЕРАЦИЯ КРАША (НОВАЯ МАТЕМАТИКА) ===
+def generate_crash_multiplier() -> float:
+    r = random.random()
+    if r < 0.07:  
+        # 7% шанс моментального взрыва на взлете
+        return 1.00
+    elif r < 0.90:  
+        # 83% шанс взрыва в диапазоне 1.01x - 10.0x
+        # Возведение в степень 1.7 сдвигает вероятность к началу (низкие иксы выпадают чаще)
+        return round(1.01 + (random.random() ** 1.7) * 8.99, 2)
+    else:  
+        # 10% шанс улететь выше 10.0x (редкие крупные множители)
+        return round(10.01 + (random.random() ** 2.0) * 90.0, 2)
 
 # === ИГРА КРАШ ===
 @router.message(Command("crash", "краш"))
@@ -44,44 +56,45 @@ async def cmd_crash(message: types.Message):
 
     coef_str = parts[2].replace(",", ".")
     try:
-        multiplier = float(coef_str)
-        if multiplier <= 1.0:
+        chosen_multiplier = float(coef_str)
+        if chosen_multiplier <= 1.0:
             raise ValueError()
     except ValueError:
-        await message.reply("❌ Коэффициент должен быть числом больше 1.0.")
+        await message.reply("❌ Коэффициент автовывода должен быть числом больше 1.0.")
         return
 
-    if multiplier > 100.0:
-        await message.reply("❌ Максимальный допустимый коэффициент в Краш: 100.0")
-        return
+    # Генерируем точку краша ракеты
+    crash_point = generate_crash_multiplier()
 
-    # В игре краш случайным образом выбирается число от 1 до 10,000.
-    # Коэффициент масштабируется: целевое число = коэф * 100.
-    rolled_num = random.randint(1, 10000)
-    target_num = int(multiplier * 100)
-
-    # Снимаем ставку
+    # Списываем ставку перед началом полета
     db.update_balance(message.from_user.id, -bet)
 
-    if rolled_num >= target_num:
-        payout = int(bet * multiplier)
+    # Логика исхода игры
+    if crash_point >= chosen_multiplier:
+        # Ракета долетела до коэффициента игрока -> Победа!
+        payout = int(bet * chosen_multiplier)
         new_bal = db.update_balance(message.from_user.id, payout)
+        
         await message.reply(
             f"📈 **ИГРА КРАШ**\n\n"
-            f"🎲 Бот выбрал число: **{rolled_num:,}**\n"
-            f"🎯 Ваша цель: **{target_num:,}** (коэфф. {multiplier})\n\n"
+            f"🚀 Ракета успешно долетела до вашего автовывода и полетела дальше!\n"
+            f"💥 Ракета взорвалась на отметке: **{crash_point:.2f}x**\n\n"
             f"🎉 **ВЫ ВЫИГРАЛИ!**\n"
+            f"🎯 Ваша цель: **{chosen_multiplier:.2f}x**\n"
             f"💵 Начислено: **{payout:,}** коинов\n"
             f"💰 Ваш баланс: **{new_bal:,}** коинов.",
             parse_mode="Markdown"
         )
     else:
+        # Ракета взорвалась раньше -> Проигрыш
         new_bal = db.get_balance(message.from_user.id)
+        
         await message.reply(
             f"📈 **ИГРА КРАШ**\n\n"
-            f"🎲 Бот выбрал число: **{rolled_num:,}**\n"
-            f"🎯 Ваша цель: **{target_num:,}** (коэфф. {multiplier})\n\n"
-            f"💥 **ВЫ ПРОИГРАЛИ!**\n"
+            f"💥 **РАКЕТА КРАШНУЛАСЬ!**\n"
+            f"💨 Взрыв произошел на отметке: **{crash_point:.2f}x**\n\n"
+            f"❌ **ВЫ ПРОИГРАЛИ!**\n"
+            f"🎯 Ваша цель была: **{chosen_multiplier:.2f}x**\n"
             f"💸 Потеряно: **{bet:,}** коинов\n"
             f"💰 Ваш баланс: **{new_bal:,}** коинов.",
             parse_mode="Markdown"
@@ -90,7 +103,6 @@ async def cmd_crash(message: types.Message):
 # === ЗАПУСК ИГР НА ПОЛЕ ===
 @router.message(Command("tower", "diamonds", "pyramid", "башня", "алмазы", "пирамида"))
 async def start_grid_game(message: types.Message):
-    # Преобразуем русские команды
     cmd = message.text.split()[0].lower().replace("/", "")
     if cmd in ["башня", "tower"]:
         game_type = "tower"
@@ -212,7 +224,6 @@ async def handle_game_callback(callback: types.CallbackQuery):
 
         level_mines = mines[current_level - 1]
         if click_col in level_mines:
-            # Наступили на мину
             db.finish_game(user_id, won=False)
             await callback.answer("💥 БУМ! Мина!", show_alert=True)
             
@@ -231,13 +242,11 @@ async def handle_game_callback(callback: types.CallbackQuery):
             )
             return
         else:
-            # Безопасно
             history[str(current_level)] = click_col
             next_level = current_level + 1
             completed_mult = spec["multipliers"][current_level]
 
             if current_level == spec["levels"]:
-                # Пройден последний уровень
                 db.update_game_level(user_id, next_level, completed_mult, history)
                 payout = db.finish_game(user_id, won=True)
                 await callback.answer("🏆 НЕВЕРОЯТНО! ВСЯ СЕТКА ПРОЙДЕНА!", show_alert=True)
