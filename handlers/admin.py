@@ -29,7 +29,7 @@ async def admin_give_coins(message: types.Message):
     amount_str = parts[2].strip()
 
     if not amount_str.isdigit():
-        await message.reply("❌ Количество коинов должно быть целым положительным числом.")
+        await message.reply("❌ Количество коинов должно быть целым числом.")
         return
 
     amount = int(amount_str)
@@ -119,13 +119,22 @@ async def admin_view_game(message: types.Message):
     if not game:
         if len(parts) < 2:
             await message.reply(
-                "👀 У вас сейчас **нет активных игр**.\nЗапустите сначала игру, например: `/tower 100`, а затем введите `/просмотр`."
+                "👀 У вас сейчас **нет активных пошаговых игр**.\n"
+                "Эта команда работает только для игр типа **Башня, Алмазы, Пирамида**."
             )
         else:
             await message.reply(
-                f"👀 У пользователя `{target_input}` сейчас **нет активных игр** на игровом поле.",
+                f"👀 У пользователя `{target_input}` сейчас **нет активных пошаговых игр**.",
                 parse_mode="Markdown"
             )
+        return
+
+    # Эта команда работает только для игр на поле (Башня, Алмазы, Пирамида)
+    if game["type"] not in ["tower", "diamonds", "pyramid"]:
+        await message.reply(
+            f"👀 Игра пользователя `{target_input}` ({game['type']}) не является пошаговой и не может быть просмотрена.",
+            parse_mode="Markdown"
+        )
         return
 
     game_type = game["type"]
