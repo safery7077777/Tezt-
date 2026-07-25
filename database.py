@@ -49,7 +49,11 @@ class Database:
                 self.data["users"][uid] = {
                     "balance": settings.START_BALANCE,
                     "last_bonus": None,
-                    "username": username.lower() if username else None
+                    "username": username.lower() if username else None,
+                    "registration_date": datetime.utcnow().isoformat(), # Новое поле
+                    "games": 0, # Новое поле
+                    "won": 0,   # Новое поле
+                    "lost": 0   # Новое поле
                 }
                 self.save_unlocked()
             else:
@@ -58,13 +62,13 @@ class Database:
                     self.save_unlocked()
             return self.data["users"][uid]
 
-    def get_user_by_username(self, username: str) -> tuple:
+    def get_user_by_username(self, username: str) -> tuple[str | None, dict | None]:
         username_lower = username.lower().replace("@", "")
         with self.lock:
             for uid, user in self.data["users"].items():
                 if user.get("username") == username_lower:
                     return uid, user
-            if username_lower.isdigit():
+            if username_lower.isdigit(): # Поиск по ID, если ввод похож на число
                 uid = username_lower
                 if uid in self.data["users"]:
                     return uid, self.data["users"][uid]
@@ -76,6 +80,13 @@ class Database:
         with self.lock:
             current_bal = self.data["users"][uid]["balance"]
             new_bal = current_bal + amount
+            
+            # Обновление статистики выигрышей/проигрышей
+            if amount > 0:
+                self.data["users"][uid]["won"] = self.data["users"][uid].get("won", 0) + amount
+            else: # amount <= 0 (проигрыш или списание)
+                self.data["users"][uid]["lost"] = self.data["users"][uid].get("lost", 0) + abs(amount)
+
             if new_bal < 0:
                 new_bal = 0
             if new_bal > settings.MAX_BALANCE:
@@ -107,19 +118,32 @@ class Database:
             bonus_amount = random.randint(1, 10000)
             current_bal = user["balance"]
             new_bal = min(current_bal + bonus_amount, settings.MAX_BALANCE)
-            actual_added = new_bal - current_bal
+            actual_added = new_bal - current_bal # Сколько реально добавилось
             
             user["balance"] = new_bal
             user["last_bonus"] = now.isoformat()
+            
+            # Обновление статистики
+            if actual_added > 0:
+                user["won"] = user.get("won", 0) + actual_added
+            
             self.save_unlocked()
             return True, actual_added
+    
+    def increment_games_played(self, user_id: int):
+        uid = str(user_id)
+        with self.lock:
+            user = self.data["users"].get(uid)
+            if user:
+                user["games"] = user.get("games", 0) + 1
+                self.save_unlocked()
 
     def get_active_game(self, user_id: int) -> dict:
         uid = str(user_id)
         with self.lock:
             return self.data["active_games"].get(uid)
 
-    def start_game(self, user_id: int, game_type: str, bet: int, mines: list):
+    def start_game(self, user_id: int, game_type: str, bet: int, mines: list = None):
         uid = str(user_id)
         with self.lock:
             self.data["active_games"][uid] = {
@@ -127,10 +151,11 @@ class Database:
                 "bet": bet,
                 "current_level": 1,
                 "multiplier": 1.0,
-                "mines": mines,
+                "mines": mines or [], # Для игр с полем
                 "history": {}
             }
             self.data["users"][uid]["balance"] -= bet
+            # Обновление lost уже в update_balance
             self.save_unlocked()
 
     def update_game_level(self, user_id: int, level: int, multiplier: float, history: dict):
@@ -153,6 +178,8 @@ class Database:
                     current_bal = self.data["users"][uid]["balance"]
                     new_bal = min(current_bal + payout, settings.MAX_BALANCE)
                     self.data["users"][uid]["balance"] = new_bal
+                    # Обновление won уже в update_balance
+                # else: lost обновляется в update_balance при снятии ставки
                 del self.data["active_games"][uid]
                 self.save_unlocked()
         return payout
