@@ -1,9 +1,11 @@
-import math
+import logging
+from datetime import datetime
 from aiogram import Router, types
 from aiogram.filters import Command, CommandStart
 from database import db
-from config import ADMIN_ID_LIST # Для профиля
+from config import ADMIN_ID_LIST
 
+logger = logging.getLogger(__name__)
 router = Router()
 
 def format_balance(amount: int) -> str:
@@ -14,7 +16,7 @@ def format_balance(amount: int) -> str:
         return f"{amount / 1_000_000:.2f}kk"
     if amount >= 1_000:
         return f"{amount / 1_000:.2f}k"
-    return f"{amount:,}" # Обычное форматирование для меньших чисел
+    return f"{amount:,}"
 
 
 @router.message(CommandStart())
@@ -44,11 +46,13 @@ async def cmd_start(message: types.Message):
     )
     await message.reply(welcome, parse_mode="Markdown")
 
+
 @router.message(Command("balance", "баланс"))
 async def cmd_balance(message: types.Message):
     user_id = message.from_user.id
     balance = db.get_balance(user_id)
     await message.reply(f"💰 Ваш текущий баланс: **{balance:,}** коинов.", parse_mode="Markdown")
+
 
 @router.message(Command("bonus", "бонус"))
 async def cmd_bonus(message: types.Message):
@@ -59,19 +63,26 @@ async def cmd_bonus(message: types.Message):
     else:
         await message.reply(f"⏳ Бонус уже получен! Следующая попытка через: **{result}**.", parse_mode="Markdown")
 
+
 @router.message(Command("профиль", "profile"))
 async def cmd_profile(message: types.Message):
     user_id = message.from_user.id
-    user_data = db.get_user(user_id) # Гарантируем, что пользователь есть в БД
+    user_data = db.get_user(user_id, message.from_user.username)
     
     # Расчет оборота и проигранных
     total_won = user_data.get('won', 0)
     total_lost = user_data.get('lost', 0)
     total_turnover = total_won + total_lost
     
-    # Форматирование даты регистрации
-    reg_date_utc = datetime.fromisoformat(user_data["registration_date"])
-    reg_date_local = reg_date_utc.strftime("%d-%m-%Y %H:%M") # Можно указать нужный часовой пояс, по умолчанию UTC
+    # Совместимость со старой базой данных (если поля нет, создаем текущей датой)
+    reg_date_str = user_data.get("registration_date")
+    if not reg_date_str:
+        reg_date_str = datetime.utcnow().isoformat()
+        user_data["registration_date"] = reg_date_str
+        db.save() # Сохраняем изменения в БД
+
+    reg_date_utc = datetime.fromisoformat(reg_date_str)
+    reg_date_local = reg_date_utc.strftime("%d-%m-%Y %H:%M")
 
     status = "Админ" if user_id in ADMIN_ID_LIST else "Игрок"
 
@@ -89,6 +100,7 @@ async def cmd_profile(message: types.Message):
     )
     await message.reply(profile_text, parse_mode="Markdown")
 
+
 @router.message(Command("дать", "transfer"))
 async def cmd_transfer_coins(message: types.Message):
     parts = message.text.split()
@@ -102,7 +114,7 @@ async def cmd_transfer_coins(message: types.Message):
     try:
         amount = int(amount_str)
         if amount <= 0:
-            raise ValueError("❌ Количество коинов должно быть больше нуля.")
+            raise ValueError()
     except ValueError:
         await message.reply("❌ Количество коинов должно быть целым положительным числом.")
         return
@@ -139,7 +151,8 @@ async def cmd_transfer_coins(message: types.Message):
         f"💰 Ваш новый баланс: **{sender_new_balance:,}** коинов.",
         parse_mode="Markdown"
     )
-    # Оповещаем получателя, если это возможно (бот должен быть в личке или общей группе)
+    
+    # Оповещаем получателя
     try:
         await message.bot.send_message(
             chat_id=int(target_uid),
