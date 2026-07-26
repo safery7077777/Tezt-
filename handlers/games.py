@@ -1,7 +1,9 @@
 import random
 import re
+import asyncio # Добавлено для анимации гонок
 from aiogram import Router, types, F
 from aiogram.filters import Command
+from aiogram.utils.keyboard import InlineKeyboardBuilder # Добавлено для выбора в гонках
 from database import db
 from game_config import GAME_SPECS, generate_mines
 from keyboards import get_game_keyboard, get_revealed_keyboard
@@ -22,17 +24,14 @@ def parse_bet(message: types.Message, bet_str: str) -> int:
 
     # 2. Обработка сокращений (к, кк, м)
     multiplier = 1
-    # Миллионы (кк, kk, м, m)
     if re.search(r'(кк|kk|м|m)$', s):
         multiplier = 1_000_000
         s = re.sub(r'(кк|kk|м|m)$', '', s)
-    # Тысячи (к, k)
     elif re.search(r'(к|k)$', s):
         multiplier = 1_000
         s = re.sub(r'(к|k)$', '', s)
 
     try:
-        # Превращаем в число (float, чтобы работало 1.5к)
         val = float(s)
         bet = int(val * multiplier)
     except ValueError:
@@ -75,12 +74,12 @@ async def cmd_crash(message: types.Message):
         return
 
     crash_point = generate_crash_multiplier()
-    db.update_balance(message.from_user.id, -bet) # Снятие ставки
-    db.increment_games_played(message.from_user.id) # Игра сыграна
+    db.update_balance(message.from_user.id, -bet, is_game=True) # Снятие ставки с флагом игры
+    db.increment_games_played(message.from_user.id)
 
     if crash_point >= chosen_multiplier:
         payout = int(bet * chosen_multiplier)
-        new_bal = db.update_balance(message.from_user.id, payout) # Начисление выигрыша
+        new_bal = db.update_balance(message.from_user.id, payout, is_game=True) # Начисление выигрыша с флагом игры
         await message.reply(
             f"📈 **КРАШ**\n🚀 Ракета долетела до: **{crash_point:.2f}x**\n"
             f"🎉 Победитель: {message.from_user.mention_markdown()}\n"
@@ -90,7 +89,7 @@ async def cmd_crash(message: types.Message):
             parse_mode="Markdown"
         )
     else:
-        new_bal = db.get_balance(message.from_user.id) # Баланс уже без ставки
+        new_bal = db.get_balance(message.from_user.id)
         await message.reply(
             f"📈 **КРАШ**\n💥 Ракету разорвало на: **{crash_point:.2f}x**\n"
             f"❌ Проигравший: {message.from_user.mention_markdown()}\n"
@@ -98,6 +97,152 @@ async def cmd_crash(message: types.Message):
             f"💰 Ваш баланс: **{new_bal:,}**", 
             parse_mode="Markdown"
         )
+
+# === ИГРА ГОНКИ (RACE / РЕЙС) ===
+@router.message(Command("race", "рейс"))
+async def cmd_race(message: types.Message):
+    parts = message.text.split()
+    if len(parts) < 2:
+        await message.reply("📝 Использование: `/race [ставка]` или `/рейс [ставка]`\n_Примеры: /race все, /рейс 10к_", parse_mode="Markdown")
+        return
+
+    try:
+        bet = parse_bet(message, parts[1])
+    except ValueError as e:
+        await message.reply(str(e), parse_mode="Markdown")
+        return
+
+    # Список виртуальных гонщиков
+    animals = [
+        ("🏎️ болид", 0),
+        ("🐎 конь", 1),
+        ("🐕 пёсель", 2),
+        ("🐇 кролик", 3),
+        ("🐢 черепаха", 4)
+    ]
+
+    builder = InlineKeyboardBuilder()
+    for name, idx in animals:
+        builder.row(types.InlineKeyboardButton(
+            text=name,
+            callback_data=f"race_choose:{idx}:{message.from_user.id}:{bet}"
+        ))
+
+    await message.reply(
+        f"🏎️ **ГОНКИ**\n"
+        f"👤 Игрок: {message.from_user.mention_markdown()}\n"
+        f"💰 Ставка: **{bet:,}** коинов\n\n"
+        f"👉 **Выберите на кого ставите (Победа дает 10x):**",
+        reply_markup=builder.as_markup(),
+        parse_mode="Markdown"
+    )
+
+@router.callback_query(F.data.startswith("race_choose:"))
+async def handle_race_choice(callback: types.CallbackQuery):
+    parts = callback.data.split(":")
+    chosen_idx = int(parts[1])
+    owner_id = int(parts[2])
+    bet = int(parts[3])
+
+    if callback.from_user.id != owner_id:
+        await callback.answer("⚠️ Это не ваши гонки! Начните свои командой /race.", show_alert=True)
+        return
+
+    user_bal = db.get_balance(owner_id)
+    if user_bal < bet:
+        await callback.answer("❌ Недостаточно средств для совершения этой ставки!", show_alert=True)
+        return
+
+    await callback.answer() # Убираем вечную загрузку на кнопке
+
+    # Списываем ставку перед началом заезда
+    db.update_balance(owner_id, -bet, is_game=True)
+    db.increment_games_played(owner_id)
+
+    animals_emojis = {0: "🏎️", 1: "🐎", 2: "🐕", 3: "🐇", 4: "🐢"}
+    animals_names = {0: "болид", 1: "конь", 2: "пёсель", 3: "кролик", 4: "черепаха"}
+
+    # Позиции на старте
+    positions = [0, 0, 0, 0, 0]
+    track_length = 8 # длина дорожки
+
+    # Анимационный цикл (всего 4 шага симуляции заезда)
+    for step in range(4):
+        for i in range(5):
+            positions[i] += random.randint(1, 3)
+            if positions[i] > track_length:
+                positions[i] = track_length
+
+        # Отрисовка дорожек
+        track_text = []
+        for i in range(5):
+            emoji = animals_emojis[i]
+            pos = positions[i]
+            # Формируем линию дорожки
+            line = "➖" * pos + emoji + "➖" * (track_length - pos) + "🏁"
+            chosen_mark = " 👈 ваш выбор" if i == chosen_idx else ""
+            track_text.append(f"{line} {chosen_mark}")
+
+        progress_msg = (
+            f"🏎️ **ГОНКА НАЧАЛАСЬ!**\n"
+            f"👤 Игрок: {callback.from_user.mention_markdown()}\n"
+            f"💰 Ставка: **{bet:,}** коинов\n\n"
+            + "\n".join(track_text)
+        )
+
+        try:
+            await callback.message.edit_text(progress_msg, reply_markup=None, parse_mode="Markdown")
+        except Exception:
+            pass
+        await asyncio.sleep(1.2) # Оптимальный интервал для анимации без превышения лимитов Telegram API
+
+    # Вычисляем победителя
+    max_pos = max(positions)
+    leaders = [i for i, pos in enumerate(positions) if pos == max_pos]
+    winner_idx = random.choice(leaders) # Если несколько на одной черте, выбираем случайного
+
+    # Финальная отрисовка финиша
+    track_text = []
+    for i in range(5):
+        emoji = animals_emojis[i]
+        pos = positions[i] if i != winner_idx else track_length
+        # победитель пересекает финишную черту
+        line = "➖" * track_length + "🏁" + emoji if i == winner_idx else "➖" * pos + emoji + "➖" * (track_length - pos) + "🏁"
+        chosen_mark = " 👈 ваш выбор" if i == chosen_idx else ""
+        track_text.append(f"{line} {chosen_mark}")
+
+    won = (chosen_idx == winner_idx)
+    
+    if won:
+        payout = bet * 10
+        new_bal = db.update_balance(owner_id, payout, is_game=True)
+        result_text = (
+            f"🏆 **ПОБЕДА!**\n"
+            f"🎉 Первым финишировал {animals_emojis[winner_idx]} **{animals_names[winner_idx]}**!\n"
+            f"💵 Ваш выигрыш (10x): **{payout:,}** коинов!\n"
+            f"💰 Ваш баланс: **{new_bal:,}** коинов."
+        )
+    else:
+        new_bal = db.get_balance(owner_id)
+        result_text = (
+            f"💥 **ПРОИГРЫШ!**\n"
+            f"🏆 Победитель: {animals_emojis[winner_idx]} **{animals_names[winner_idx]}**\n"
+            f"💸 Потеряно: **{bet:,}** коинов\n"
+            f"💰 Ваш баланс: **{new_bal:,}** коинов."
+        )
+
+    final_msg = (
+        f"🏎️ **ГОНКА ЗАВЕРШЕНА!**\n"
+        f"👤 Игрок: {callback.from_user.mention_markdown()}\n\n"
+        + "\n".join(track_text) + "\n\n"
+        + result_text
+    )
+
+    try:
+        await callback.message.edit_text(final_msg, parse_mode="Markdown")
+    except Exception:
+        pass
+
 
 # === РУЛЕТКА ===
 @router.message(Command("рулетка", "roulette"))
@@ -114,38 +259,27 @@ async def cmd_roulette(message: types.Message):
         await message.reply(str(e), parse_mode="Markdown")
         return
 
-    # Валидация выбора рулетки
-    valid_choices = ["красное", "черное", "чет", "нечет"] + [str(i) for i in range(37)] # 0-36
+    valid_choices = ["красное", "черное", "чет", "нечет"] + [str(i) for i in range(37)]
     if choice not in valid_choices:
         await message.reply("❌ Неверный выбор для рулетки. Выберите: `красное`, `черное`, `чет`, `нечет` или число от `0` до `36`.", parse_mode="Markdown")
         return
 
-    db.update_balance(message.from_user.id, -bet) # Снятие ставки
-    db.increment_games_played(message.from_user.id) # Игра сыграна
+    db.update_balance(message.from_user.id, -bet, is_game=True)
+    db.increment_games_played(message.from_user.id)
 
-    # Генерируем результат рулетки
     roll = random.randint(0, 36)
     
-    # Определяем цвет
     red_numbers = [1, 3, 5, 7, 9, 12, 14, 16, 18, 19, 21, 23, 25, 27, 30, 32, 34, 36]
     black_numbers = [2, 4, 6, 8, 10, 11, 13, 15, 17, 20, 22, 24, 26, 28, 29, 31, 33, 35]
     
-    roll_color = ""
-    if roll == 0:
-        roll_color = "зеленое" # Зиро
-    elif roll in red_numbers:
-        roll_color = "красное"
-    elif roll in black_numbers:
-        roll_color = "черное"
-    
+    roll_color = "зеленое" if roll == 0 else ("красное" if roll in red_numbers else "черное")
     roll_parity = "чет" if roll != 0 and roll % 2 == 0 else ("нечет" if roll != 0 and roll % 2 != 0 else "")
 
     payout = 0
     win_message = ""
-    
-    # Проверка выигрыша
     won = False
-    if choice == str(roll): # Ставка на число
+    
+    if choice == str(roll):
         payout = bet * 36
         win_message = f"✅ Выпало ваше число **{roll}**! Выигрыш **{payout:,}**."
         won = True
@@ -167,7 +301,7 @@ async def cmd_roulette(message: types.Message):
         won = True
 
     if won:
-        new_bal = db.update_balance(message.from_user.id, payout)
+        new_bal = db.update_balance(message.from_user.id, payout, is_game=True)
         await message.reply(
             f"🎰 **РУЛЕТКА**\n"
             f"👤 Игрок: {message.from_user.mention_markdown()}\n"
@@ -178,7 +312,7 @@ async def cmd_roulette(message: types.Message):
             parse_mode="Markdown"
         )
     else:
-        new_bal = db.get_balance(message.from_user.id) # Баланс уже без ставки
+        new_bal = db.get_balance(message.from_user.id)
         await message.reply(
             f"🎰 **РУЛЕТКА**\n"
             f"👤 Игрок: {message.from_user.mention_markdown()}\n"
@@ -194,7 +328,7 @@ async def cmd_roulette(message: types.Message):
 async def cmd_guess(message: types.Message):
     parts = message.text.split()
     if len(parts) < 3:
-        await message.reply("📝 Использование: `/guess [ставка] [число (1-100/1000)] [макс_диапазон (опц.)]`\n_Примеры: /guess 100 50, /guess все 500 1000_", parse_mode="Markdown")
+        await message.reply("📝 Использование: `/guess [ставка] [число] [диапазон (опц. 100 или 1000)]`\n_Примеры: /guess 100 50, /guess все 500 1000_", parse_mode="Markdown")
         return
 
     try:
@@ -204,7 +338,7 @@ async def cmd_guess(message: types.Message):
         await message.reply(str(e), parse_mode="Markdown")
         return
 
-    max_range = 100 # По умолчанию
+    max_range = 100
     if len(parts) > 3 and parts[3].isdigit():
         max_range = int(parts[3])
     
@@ -218,8 +352,8 @@ async def cmd_guess(message: types.Message):
 
     tolerance = 100 if max_range == 1000 else 10
     
-    db.update_balance(message.from_user.id, -bet) # Снятие ставки
-    db.increment_games_played(message.from_user.id) # Игра сыграна
+    db.update_balance(message.from_user.id, -bet, is_game=True)
+    db.increment_games_played(message.from_user.id)
 
     bot_number = random.randint(1, max_range)
     payout = 0
@@ -238,7 +372,7 @@ async def cmd_guess(message: types.Message):
         result_msg = f"❌ Мимо. Число было **{bot_number}**."
 
     if won:
-        new_bal = db.update_balance(message.from_user.id, payout)
+        new_bal = db.update_balance(message.from_user.id, payout, is_game=True)
         await message.reply(
             f"🔢 **УГАДАЙ ЧИСЛО**\n"
             f"👤 Игрок: {message.from_user.mention_markdown()}\n"
@@ -250,7 +384,7 @@ async def cmd_guess(message: types.Message):
             parse_mode="Markdown"
         )
     else:
-        new_bal = db.get_balance(message.from_user.id) # Баланс уже без ставки
+        new_bal = db.get_balance(message.from_user.id)
         await message.reply(
             f"🔢 **УГАДАЙ ЧИСЛО**\n"
             f"👤 Игрок: {message.from_user.mention_markdown()}\n"
@@ -281,24 +415,17 @@ async def cmd_dice(message: types.Message):
         await message.reply(str(e), parse_mode="Markdown")
         return
 
-    # Валидация выбора для кубиков
-    valid_choices = []
-    if num_dice == 1:
-        valid_choices = ["меньше", "больше", "3"]
-    elif num_dice == 2:
-        valid_choices = ["меньше", "больше", "7"]
-    
+    valid_choices = ["меньше", "больше", "3"] if num_dice == 1 else ["меньше", "больше", "7"]
     if choice_str not in valid_choices:
         if num_dice == 1:
             await message.reply("❌ Для 1 кубика выберите: `меньше`, `больше` или `3`.", parse_mode="Markdown")
-        else: # num_dice == 2
+        else:
             await message.reply("❌ Для 2 кубиков выберите: `меньше`, `больше` или `7`.", parse_mode="Markdown")
         return
 
-    db.update_balance(message.from_user.id, -bet) # Снятие ставки
-    db.increment_games_played(message.from_user.id) # Игра сыграна
+    db.update_balance(message.from_user.id, -bet, is_game=True)
+    db.increment_games_played(message.from_user.id)
 
-    # Бросаем кубики
     rolls = [random.randint(1, 6) for _ in range(num_dice)]
     total_roll = sum(rolls)
     
@@ -334,7 +461,7 @@ async def cmd_dice(message: types.Message):
             won = True
 
     if won:
-        new_bal = db.update_balance(message.from_user.id, payout)
+        new_bal = db.update_balance(message.from_user.id, payout, is_game=True)
         await message.reply(
             f"🎲 **КУБИКИ ({num_dice} шт.)**\n"
             f"👤 Игрок: {message.from_user.mention_markdown()}\n"
@@ -346,7 +473,7 @@ async def cmd_dice(message: types.Message):
             parse_mode="Markdown"
         )
     else:
-        new_bal = db.get_balance(message.from_user.id) # Баланс уже без ставки
+        new_bal = db.get_balance(message.from_user.id)
         await message.reply(
             f"🎲 **КУБИКИ ({num_dice} шт.)**\n"
             f"👤 Игрок: {message.from_user.mention_markdown()}\n"
@@ -361,7 +488,6 @@ async def cmd_dice(message: types.Message):
 # === ЗАПУСК ИГР НА ПОЛЕ ===
 @router.message(Command("tower", "diamonds", "pyramid", "башня", "алмазы", "пирамида"))
 async def start_grid_game(message: types.Message):
-    # Определяем тип игры по команде
     cmd = message.text.split()[0].lower().replace("/", "")
     if cmd in ["башня", "tower"]: game_type = "tower"
     elif cmd in ["алмазы", "diamonds"]: game_type = "diamonds"
@@ -384,7 +510,7 @@ async def start_grid_game(message: types.Message):
 
     spec = GAME_SPECS[game_type]
     db.start_game(message.from_user.id, game_type, bet, generate_mines(game_type))
-    db.increment_games_played(message.from_user.id) # Игра сыграна (пошаговая)
+    db.increment_games_played(message.from_user.id)
     
     kb = get_game_keyboard(1, {}, spec["levels"], spec["width"], message.from_user.id)
     await message.reply(
@@ -401,7 +527,6 @@ async def handle_game_callback(callback: types.CallbackQuery):
     action = parts[1]
     owner_id = int(parts[-1])
 
-    # Защита от чужих нажатий
     if owner_id != 0 and owner_id != callback.from_user.id:
         await callback.answer("⚠️ Это не ваша игра! Начните свою.", show_alert=True)
         return
@@ -410,10 +535,10 @@ async def handle_game_callback(callback: types.CallbackQuery):
     game = db.get_active_game(user_id)
     if not game:
         await callback.answer("❌ Игра не найдена.")
-        try: # Попытаться удалить старую клавиатуру, если игра уже завершена по тайм-ауту/сбою
+        try:
             await callback.message.edit_reply_markup(reply_markup=None)
         except Exception:
-            pass # Если не удалось удалить, игнорируем
+            pass
         return
 
     spec = GAME_SPECS[game["type"]]
@@ -459,20 +584,20 @@ async def handle_game_callback(callback: types.CallbackQuery):
         else:
             history = game["history"]
             history[str(lvl)] = col
-            completed_mult = spec["multipliers"][lvl] # Множитель за ПРОЙДЕННЫЙ уровень
+            completed_mult = spec["multipliers"][lvl]
             
-            if lvl == spec["levels"]: # Пройден последний уровень
-                db.update_game_level(user_id, lvl+1, completed_mult, history) # Обновляем на последний множитель
+            if lvl == spec["levels"]:
+                db.update_game_level(user_id, lvl+1, completed_mult, history)
                 payout = db.finish_game(user_id, won=True)
                 await callback.message.edit_text(
                     f"🏆 **ПОЛНАЯ ПОБЕДА!**\n👤 {callback.from_user.mention_markdown()}\n"
-                    f"📈 Итоговый множитель: **{completed_mult}x**\n"
+                    f"📈 Множитель: **{completed_mult}x**\n"
                     f"💵 Выигрыш: **{payout:,}** коинов!",
                     reply_markup=get_revealed_keyboard(spec["levels"], spec["width"], game["mines"], history),
                     parse_mode="Markdown"
                 )
             else:
-                db.update_game_level(user_id, lvl+1, completed_mult, history) # Обновляем текущий уровень и множитель
+                db.update_game_level(user_id, lvl+1, completed_mult, history)
                 await callback.message.edit_reply_markup(
                     reply_markup=get_game_keyboard(lvl+1, history, spec["levels"], spec["width"], user_id)
                 )
